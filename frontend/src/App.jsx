@@ -55,7 +55,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const skipAutoSave = useRef(false);
 
-  const { chatList, activeChatId, saveChat, deleteChat, setActiveChatId, getChat } =
+  const { chatList, activeChatId, saveChat, deleteChat, updateChat, setActiveChatId, getChat } =
     useChatStorage(user?.id);
 
   useEffect(() => {
@@ -166,6 +166,15 @@ function App() {
     }
   }, [deleteChat, currentChatId, resetChat]);
 
+  const handleRenameChat = useCallback((chatId, name) => {
+    updateChat(chatId, { customName: name });
+  }, [updateChat]);
+
+  const handlePinChat = useCallback((chatId) => {
+    const chat = getChat(chatId);
+    updateChat(chatId, { pinned: !chat?.pinned });
+  }, [updateChat, getChat]);
+
   const startNewProfile = useCallback(
     async (parsed) => {
       const symptom = parsed.symptom_conditions || [];
@@ -193,10 +202,13 @@ function App() {
           "I wasn't able to map specific health states from that description. Could you try naming your conditions more directly? For example: \"I have diabetes and high blood pressure\" or \"I'm a 50-year-old woman with asthma.\""
         );
       } else {
-        addMessage(
-          "system",
-          `Built your care pathway. ${pathway.nodes.length} health states mapped. 5-year projected out-of-pocket: $${Math.round(pathway.total_5yr_oop).toLocaleString()}.`
-        );
+        const hasSuspected = pathway.nodes.some((n) => n.id?.startsWith("suspected_"));
+        const hasConfirmed = pathway.nodes.some((n) => n.node_type === "current");
+        let msg = `Built your care pathway. ${pathway.nodes.length} health states mapped. 5-year projected out-of-pocket: $${Math.round(pathway.total_5yr_oop).toLocaleString()}.`;
+        if (hasSuspected && !hasConfirmed) {
+          msg += " Based on your symptoms, I've mapped possible related conditions. You can add more details like your age, other diagnoses, or insurance type to refine the projection.";
+        }
+        addMessage("system", msg);
       }
     },
     []
@@ -236,7 +248,7 @@ function App() {
             return;
           }
           if (parsed.off_topic) {
-            addMessage("system", "Sorry, I can only help with health-related questions. Try describing your age, conditions, and insurance — like \"I'm a 45-year-old male with pre-diabetes and hypertension on a PPO plan.\"");
+            addMessage("system", "I didn't catch a health condition in that. You can describe symptoms, diagnoses, or a full profile — for example:\n\n• \"I've been having chest pain and shortness of breath\"\n• \"Type 2 diabetes and high blood pressure\"\n• \"55-year-old female with asthma on a PPO plan\"");
             setIsProcessing(false);
             return;
           }
@@ -415,6 +427,8 @@ function App() {
                     activeChatId={currentChatId}
                     onSelect={restoreChat}
                     onDelete={handleDeleteChat}
+                    onRename={handleRenameChat}
+                    onPin={handlePinChat}
                   />
                 )}
                 <div className="messages">

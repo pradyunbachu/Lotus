@@ -1,89 +1,153 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-
-const STORAGE_KEY_PREFIX = "lotus_chats_";
-
-function loadStore(userId) {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + userId);
-    if (!raw) return { activeChatId: null, chats: {} };
-    return JSON.parse(raw);
-  } catch {
-    return { activeChatId: null, chats: {} };
-  }
-}
-
-function persistStore(userId, store) {
-  try {
-    localStorage.setItem(STORAGE_KEY_PREFIX + userId, JSON.stringify(store));
-  } catch {
-    // localStorage full or unavailable — silently ignore
-  }
-}
+import { supabase } from "../services/supabase";
 
 export default function useChatStorage(userId) {
-  const [store, setStore] = useState({ activeChatId: null, chats: {} });
-  const initialized = useRef(false);
+  const [chats, setChats] = useState({});
+  const [activeChatId, setActiveChatIdState] = useState(null);
+  const loaded = useRef(false);
+  const saveQueue = useRef(new Map());
+  const flushTimer = useRef(null);
 
-  // Load from localStorage when userId becomes available
+  // Load all chats from Supabase on login
   useEffect(() => {
     if (!userId) {
-      setStore({ activeChatId: null, chats: {} });
-      initialized.current = false;
+      setChats({});
+      setActiveChatIdState(null);
+      loaded.current = false;
       return;
     }
-    const loaded = loadStore(userId);
-    setStore(loaded);
-    initialized.current = true;
+
+    let cancelled = false;
+
+    (async () => {
+      const { data, error } = await supabase
+        .from("chat_history")
+        .select("id, created_at, updated_at, data")
+        .eq("user_id", userId)
+        .order("updated_at", { ascending: false });
+
+      if (cancelled || error) return;
+
+      const map = {};
+      for (const row of data) {
+        map[row.id] = {
+          ...row.data,
+          id: row.id,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        };
+      }
+      setChats(map);
+      loaded.current = true;
+    })();
+
+    return () => { cancelled = true; };
   }, [userId]);
 
-  // Auto-persist whenever store changes
+  // Flush queued saves to Supabase (debounced)
+  const flush = useCallback(() => {
+    if (!userId || saveQueue.current.size === 0) return;
+
+    const pending = Array.from(saveQueue.current.values());
+    saveQueue.current.clear();
+
+    for (const chatState of pending) {
+      const { id, createdAt, updatedAt, ...rest } = chatState;
+      supabase
+        .from("chat_history")
+        .upsert({
+          id,
+          user_id: userId,
+          created_at: createdAt || Date.now(),
+          updated_at: updatedAt || Date.now(),
+          data: rest,
+        })
+        .then(({ error }) => {
+          if (error) console.error("Failed to save chat:", error);
+        });
+    }
+  }, [userId]);
+
+  // Flush on unmount
   useEffect(() => {
-    if (!userId || !initialized.current) return;
-    persistStore(userId, store);
-  }, [userId, store]);
+    return () => {
+      clearTimeout(flushTimer.current);
+      flush();
+    };
+  }, [flush]);
 
   const saveChat = useCallback((chatState) => {
     if (!chatState?.id) return;
-    setStore((prev) => ({
-      ...prev,
-      activeChatId: chatState.id,
-      chats: {
-        ...prev.chats,
-        [chatState.id]: {
-          ...chatState,
-          updatedAt: Date.now(),
-        },
-      },
-    }));
-  }, []);
+
+    const now = Date.now();
+    const enriched = {
+      ...chatState,
+      updatedAt: now,
+      createdAt: chatState.createdAt || chats[chatState.id]?.createdAt || now,
+    };
+
+    // Update local state immediately
+    setChats((prev) => ({ ...prev, [chatState.id]: enriched }));
+    setActiveChatIdState(chatState.id);
+
+    // Queue the save and debounce
+    saveQueue.current.set(chatState.id, enriched);
+    clearTimeout(flushTimer.current);
+    flushTimer.current = setTimeout(flush, 1000);
+  }, [flush, chats]);
 
   const deleteChat = useCallback((chatId) => {
-    setStore((prev) => {
-      const { [chatId]: _, ...rest } = prev.chats;
-      return {
-        ...prev,
-        activeChatId: prev.activeChatId === chatId ? null : prev.activeChatId,
-        chats: rest,
-      };
+    setChats((prev) => {
+      const { [chatId]: _, ...rest } = prev;
+      return rest;
     });
-  }, []);
+    setActiveChatIdState((prev) => (prev === chatId ? null : prev));
+    saveQueue.current.delete(chatId);
+
+    if (userId) {
+      supabase
+        .from("chat_history")
+        .delete()
+        .eq("id", chatId)
+        .then(({ error }) => {
+          if (error) console.error("Failed to delete chat:", error);
+        });
+    }
+  }, [userId]);
+
+  const updateChat = useCallback((chatId, updates) => {
+    setChats((prev) => {
+      const existing = prev[chatId];
+      if (!existing) return prev;
+      // Don't change updatedAt for metadata-only changes (pin, rename)
+      const updated = { ...existing, ...updates };
+      // Queue save
+      saveQueue.current.set(chatId, updated);
+      clearTimeout(flushTimer.current);
+      flushTimer.current = setTimeout(flush, 1000);
+      return { ...prev, [chatId]: updated };
+    });
+  }, [flush]);
 
   const setActiveChatId = useCallback((chatId) => {
-    setStore((prev) => ({ ...prev, activeChatId: chatId }));
+    setActiveChatIdState(chatId);
   }, []);
 
-  // Sorted chat list (most recent first)
-  const chatList = Object.values(store.chats).sort(
-    (a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)
-  );
+  const chatList = Object.values(chats).sort((a, b) => {
+    // Pinned first
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    // Then by recency
+    return (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt);
+  });
 
   return {
-    store,
     chatList,
-    activeChatId: store.activeChatId,
+    activeChatId,
     saveChat,
     deleteChat,
+    updateChat,
     setActiveChatId,
-    getChat: (id) => store.chats[id] || null,
+    getChat: (id) => chats[id] || null,
   };
 }

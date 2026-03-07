@@ -14,6 +14,67 @@ const NODE_TYPE_LABELS = {
   intervention: "Intervention",
 };
 
+function CostChart({ data }) {
+  const W = 480, H = 180, PL = 58, PR = 16, PT = 16, PB = 32;
+  const cw = W - PL - PR, ch = H - PT - PB;
+  const max = Math.max(...data, 1);
+  const step = cw / (data.length - 1);
+
+  const points = data.map((v, i) => ({
+    x: PL + i * step,
+    y: PT + ch - (v / max) * ch,
+  }));
+
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+  const areaPath = `${linePath} L${points[points.length - 1].x},${PT + ch} L${points[0].x},${PT + ch} Z`;
+
+  // Y-axis ticks
+  const ticks = 4;
+  const yLabels = Array.from({ length: ticks + 1 }, (_, i) => Math.round((max / ticks) * i));
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="cost-chart" preserveAspectRatio="xMidYMid meet">
+      {/* Grid lines */}
+      {yLabels.map((val) => {
+        const y = PT + ch - (val / max) * ch;
+        return (
+          <g key={val}>
+            <line x1={PL} y1={y} x2={W - PR} y2={y} stroke="#f3f4f6" strokeWidth="1" />
+            <text x={PL - 8} y={y + 3.5} textAnchor="end" fill="#9ca3af" fontSize="9" fontFamily="inherit">
+              ${val >= 1000 ? `${(val / 1000).toFixed(1)}k` : val}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* Area fill */}
+      <path d={areaPath} fill="url(#oopGradient)" />
+      <defs>
+        <linearGradient id="oopGradient" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#e8548e" stopOpacity="0.2" />
+          <stop offset="100%" stopColor="#e8548e" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+
+      {/* Line */}
+      <path d={linePath} fill="none" stroke="#e8548e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+
+      {/* Data points + labels */}
+      {points.map((p, i) => (
+        <g key={i}>
+          <circle cx={p.x} cy={p.y} r="4" fill="#ffffff" stroke="#e8548e" strokeWidth="2" />
+          <text x={p.x} y={p.y - 10} textAnchor="middle" fill="#e8548e" fontSize="9" fontWeight="600" fontFamily="inherit">
+            ${data[i] >= 1000 ? `${(data[i] / 1000).toFixed(1)}k` : Math.round(data[i])}
+          </text>
+          <text x={p.x} y={H - 8} textAnchor="middle" fill="#6b7280" fontSize="9.5" fontWeight="500" fontFamily="inherit">
+            Year {i + 1}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
   const {
     totalCost,
@@ -25,6 +86,7 @@ export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
     highestRisk,
     costBreakdown,
     timeline,
+    yearlyOop,
   } = useMemo(() => {
     if (!graph || !graph.nodes) {
       return {
@@ -37,6 +99,7 @@ export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
         highestRisk: null,
         costBreakdown: { current: 0, future: 0 },
         timeline: {},
+        yearlyOop: [0, 0, 0, 0, 0],
       };
     }
 
@@ -68,6 +131,18 @@ export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
       tl[y].push(n);
     }
 
+    // Year-by-year OOP projection (years 1-5)
+    const baseOop = current.reduce((s, n) => s + (n.oop_estimate || 0), 0);
+    const oop = [0, 0, 0, 0, 0];
+    for (let yr = 1; yr <= 5; yr++) {
+      oop[yr - 1] = baseOop;
+      for (const n of risks) {
+        if ((n.year || 1) <= yr) {
+          oop[yr - 1] += (n.oop_estimate || 0) * (n.probability || 0);
+        }
+      }
+    }
+
     return {
       totalCost: graph.total_5yr_cost || 0,
       totalOop: graph.total_5yr_oop || 0,
@@ -78,6 +153,7 @@ export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
       highestRisk: highest,
       costBreakdown: { current: currentCost, future: futureCost },
       timeline: tl,
+      yearlyOop: oop,
     };
   }, [graph]);
 
@@ -251,6 +327,19 @@ export default function Dashboard({ graph, comparisonGraph, onNodeSelect }) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Cost Over Time */}
+      {yearlyOop.some((v) => v > 0) && (
+        <div className="dashboard-section">
+          <div className="dashboard-section-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+            <span>Projected Annual Out-of-Pocket</span>
+          </div>
+          <CostChart data={yearlyOop} />
         </div>
       )}
 

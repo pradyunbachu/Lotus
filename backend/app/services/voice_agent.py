@@ -465,6 +465,9 @@ def _is_health_related(text: str) -> bool:
         r"\b(can\s*not|can'?t|cannot|couldn'?t|have\s+trouble|unable\s+to)\s+(breathe|sleep|walk|see|hear|move|swallow|eat|focus|remember)",
         # "something hurts/aches/is wrong"
         r"\b(hurts|aching|aches|swollen|swelling|sore|painful|stiff|numb|bleeding|burning|itching|cramping)\b",
+        # "I've been [symptom]ing" — progressive tense symptom descriptions
+        r"\bi'?ve\s+been\s+\w*(throw|cough|wheez|bleed|vomit|sneez|itch|ach|hurt|swell|cramp|faint|puk)\w*",
+        r"\bi\s+keep\s+\w*(throw|cough|wheez|bleed|vomit|sneez|itch|faint|puk)\w*",
     ]
 
     # Body parts — if ANY body part is mentioned, this is likely health-related
@@ -487,14 +490,18 @@ def _is_health_related(text: str) -> bool:
         r"\b(clogged|blocked|narrow|hardened|inflamed|infected|damaged|failing|swollen|enlarged|bleeding|leaking)\b",
         r"\b(pain|ache|sore|tender|stiff|numb|tingle|tingling|throb|cramp|spasm|burning|itchy|itching)\b",
         r"\b(dizzy|faint|nausea|vomit|wheez|cough|sneez|fever|chills|sweat)\b",
+        r"\b(throw\w*\s*up|puk\w*|gag\w*|retch\w*|dry\s*heav\w*|sick\s*to\s*my\s*stomach)\b",
         r"\b(fatigue|tired|exhausted|weak|letharg|drowsy|groggy)\b",
         r"\b(worried|worrying|anxious|stressed|nervous|restless|panick|overwhelmed|scared)\b",
         r"\b(depressed|hopeless|sad|empty|miserable|suicidal|worthless)\b",
-        r"\b(pee|urinat|peeing|urinating)\b",
+        r"\b(pee|urinat|peeing|urinating|constipat|diarrhea|bloat)\b",
         r"\b(short\s*of\s*breath|breathless|can'?t\s*breathe|difficulty\s*breath|breathing\s*(problem|issue|trouble|difficult)\w*)\b",
         r"\b(blurry|blind|deaf|ringing|hearing\s*loss)\b",
         r"\b(overweight|obese|underweight|gained\s*weight|lost\s*weight)\b",
         r"\b(diagnosed|surgery|operation|hospital|emergency|er\b|icu\b|urgent\s*care)\b",
+        r"\b(lump|bump|growth|mole|lesion|wound|scar|bruise)\b",
+        r"\b(snor\w*|apnea|sleep\w*)\b",
+        r"\b(seizure|convuls|faint|pass\w*\s*out|black\w*\s*out)\b",
     ]
 
     # Medical/clinical keywords
@@ -543,6 +550,30 @@ def _is_health_related(text: str) -> bool:
             or any(re.search(p, lower) for p in health_keywords))
 
 
+async def _llm_is_health_related(text: str) -> bool:
+    """LLM fallback for health-relatedness when regex doesn't match."""
+    if client is None:
+        return False
+    try:
+        response = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": """Determine if the user's message describes a health symptom, medical condition, disease, physical complaint, or anything related to their body/health.
+Return JSON: {"health_related": true} or {"health_related": false}
+Be GENEROUS — if there's any chance the user is describing a health issue, return true.
+Examples that ARE health-related: "I've been throwing up", "my feet are weird", "I can't stop scratching", "something is wrong with my stomach", "I feel off", "I have a rash"
+Examples that are NOT health-related: "hello", "what's the weather", "tell me a joke", random names, gibberish"""},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result.get("health_related", False)
+    except Exception:
+        return False
+
+
 async def resolve_conditions(text: str, already_detected: list[str]) -> dict:
     """
     LLM fallback: map unrecognized symptoms/diseases to the closest
@@ -575,9 +606,12 @@ Already detected conditions (do NOT repeat these): {', '.join(already_detected) 
 
 CRITICAL: distinguish between symptoms and diseases.
 - If the user names an ACTUAL DISEASE or DIAGNOSIS (e.g. "lupus", "celiac disease", "fibromyalgia"), put the mapped key in "disease_matches"
-- If the user describes SYMPTOMS (e.g. "cough", "runny nose", "chest pain", "fatigue"), think about the top differential diagnoses for those symptoms and return them in "symptom_matches" with a relevance score — symptoms are NOT confirmed diagnoses
+- If the user describes SYMPTOMS (e.g. "cough", "throwing up", "chest pain", "fatigue", "can't sleep"), think about the top differential diagnoses for those symptoms and return them in "symptom_matches" with a relevance score — symptoms are NOT confirmed diagnoses
+- ALWAYS return at least 1 symptom_match for any health-related input. Every symptom has a differential diagnosis that maps to one of the 46 keys.
+  Examples: "throwing up" → gerd (0.8), liver_disease (0.4); "headache" → migraine (0.9), hypertension (0.3); "feeling tired" → anemia (0.6), thyroid_disease (0.5), depression (0.4)
+- IMPORTANT: use ONLY exact keys from the list above. Do NOT invent keys or combine them (e.g. use "gerd" not "gerd_gastritis", use "cad" not "coronary_artery_disease").
 - For vague symptoms, return up to 3 of the MOST LIKELY causes from the 46 keys (ranked by clinical likelihood). Do not return more than 3 symptom matches.
-- If it truly cannot map to ANY of the 46, put the original term in "unmapped"
+- Only put something in "unmapped" if it is truly NOT a health symptom or condition (e.g. a name, a place). If the user describes ANY bodily symptom, you MUST map it to at least one condition key.
 - Be generous with mapping — most conditions relate to at least one of the 46
 - Return ONLY valid JSON, no other text
 
@@ -592,7 +626,9 @@ Return JSON: {{"disease_matches": ["key1"], "symptom_matches": [{{"condition": "
             temperature=0,
             response_format={"type": "json_object"},
         )
-        result = json.loads(response.choices[0].message.content)
+        raw_content = response.choices[0].message.content
+        print(f"[resolve_conditions] raw LLM response: {raw_content}")
+        result = json.loads(raw_content)
         disease = [c for c in result.get("disease_matches", [])
                    if c in CONDITION_TO_ICD and c not in already_detected]
 
@@ -621,7 +657,6 @@ Return JSON: {{"disease_matches": ["key1"], "symptom_matches": [{{"condition": "
         # Filter unmapped terms that overlap with already-detected conditions.
         # e.g. "asthma" should be dropped if "asthma_copd" is already detected.
         all_detected = set(already_detected) | set(disease) | set(symptom)
-        detected_labels = {CONDITION_TO_ICD.get(c, c) for c in all_detected}  # not useful, use keys
         def _overlaps_detected(term: str) -> bool:
             t = term.lower().strip().replace(" ", "_")
             for det in all_detected:
@@ -635,7 +670,8 @@ Return JSON: {{"disease_matches": ["key1"], "symptom_matches": [{{"condition": "
         if not disease and not symptom and not unmapped:
             unmapped = [text]
         return {"disease_matches": disease, "symptom_matches": symptom, "symptom_scores": symptom_scores, "unmapped": unmapped}
-    except Exception:
+    except Exception as e:
+        print(f"[resolve_conditions] EXCEPTION: {e}")
         return {"disease_matches": [], "symptom_matches": [], "symptom_scores": {}, "unmapped": []}
 
 
@@ -646,7 +682,9 @@ async def parse_patient_input(text: str) -> dict:
     The LLM only extracts age, sex, and insurance type.
     """
     if not _is_health_related(text):
-        return {"off_topic": True}
+        # Regex didn't match — ask the LLM before rejecting
+        if not await _llm_is_health_related(text):
+            return {"off_topic": True}
 
     # Detect conditions deterministically
     conditions = detect_conditions(text)
@@ -733,6 +771,7 @@ Do NOT extract or infer any medical conditions. Return ONLY valid JSON."""},
         symptom_conditions = resolved["symptom_matches"]
         symptom_scores = resolved.get("symptom_scores", {})
         unmapped_conditions = resolved["unmapped"]
+        print(f"[parse_patient_input] text={text!r} conditions={conditions} symptom_conditions={symptom_conditions} scores={symptom_scores} unmapped={unmapped_conditions}")
 
     return {
         "off_topic": False,

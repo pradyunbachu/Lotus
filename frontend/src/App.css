@@ -1660,6 +1660,13 @@
   margin-left: auto;
 }
 
+/* Cost Over Time Chart */
+.cost-chart {
+  width: 100%;
+  height: auto;
+  max-height: 200px;
+}
+
 /* Timeline */
 .dashboard-timeline {
   display: flex;
@@ -1807,7 +1814,7 @@
   gap: 8px;
   padding: 8px 20px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, transform 0.3s ease, opacity 0.3s ease;
 }
 
 .chat-history-item:hover {
@@ -1839,30 +1846,65 @@
   color: #9ca3af;
 }
 
-.chat-history-delete {
-  width: 22px;
-  height: 22px;
+.chat-history-star {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: transform 0.15s;
+}
+
+.chat-history-star:hover {
+  transform: scale(1.2);
+}
+
+.chat-history-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.chat-history-action-btn {
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   border: none;
-  background: transparent;
-  color: #d1d5db;
+  background: #f3f4f6;
+  color: #9ca3af;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   padding: 0;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s;
 }
 
-.chat-history-item:hover .chat-history-delete {
-  opacity: 1;
-}
-
-.chat-history-delete:hover {
+.chat-history-action-btn:hover {
   color: #e8548e;
   background: #fdf2f8;
+}
+
+.chat-history-action-delete:hover {
+  color: #ef4444;
+  background: #fef2f2;
+}
+
+.chat-history-rename-input {
+  width: 100%;
+  padding: 2px 6px;
+  border: 1px solid #e8548e;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  font-family: inherit;
+  color: #1f2937;
+  outline: none;
+  background: #ffffff;
 }
 
 .chat-history-empty {
