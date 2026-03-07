@@ -8,8 +8,10 @@ import CostSummary from "./components/CostSummary";
 import LandingPage from "./components/LandingPage";
 import TabBar from "./components/TabBar";
 import ComparePlans from "./components/ComparePlans";
+import ChatHistory from "./components/ChatHistory";
 import { generatePathway, parseProfile, parseScenario, chatAboutHealth } from "./services/api";
 import { useAuth } from "./contexts/AuthContext";
+import useChatStorage from "./hooks/useChatStorage";
 import "./App.css";
 
 function buildGraphSummary(graph) {
@@ -47,7 +49,14 @@ function App() {
   const [simulateView, setSimulateView] = useState("tree");
   const [messages, setMessages] = useState([]);
   const [pendingProfile, setPendingProfile] = useState(null);
+  const [currentChatId, setCurrentChatId] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
   const messagesEndRef = useRef(null);
+  const skipAutoSave = useRef(false);
+
+  const { chatList, activeChatId, saveChat, deleteChat, setActiveChatId, getChat } =
+    useChatStorage(user?.id);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -59,7 +68,49 @@ function App() {
     }
   }, [user, loading, currentView]);
 
+  // Auto-save current chat to localStorage whenever state changes
+  useEffect(() => {
+    if (!user?.id || !currentChatId || skipAutoSave.current) return;
+    if (messages.length === 0 && !profile) return;
+    saveChat({
+      id: currentChatId,
+      createdAt: getChat(currentChatId)?.createdAt || Date.now(),
+      messages,
+      profile,
+      graph,
+      baselineGraph,
+      interventions,
+      pendingProfile,
+    });
+  }, [messages, profile, graph, baselineGraph, interventions, pendingProfile, currentChatId, user?.id]);
+
+  // Restore active chat on mount / login
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!user?.id || restoredRef.current) return;
+    if (activeChatId) {
+      const chat = getChat(activeChatId);
+      if (chat) {
+        skipAutoSave.current = true;
+        setMessages(chat.messages || []);
+        setProfile(chat.profile || null);
+        setGraph(chat.graph || null);
+        setBaselineGraph(chat.baselineGraph || null);
+        setInterventions(chat.interventions || []);
+        setPendingProfile(chat.pendingProfile || null);
+        setCurrentChatId(activeChatId);
+        setCurrentView("simulate");
+        // Allow auto-save again on next tick
+        setTimeout(() => { skipAutoSave.current = false; }, 0);
+      }
+    }
+    restoredRef.current = true;
+  }, [user?.id, activeChatId]);
+
   const addMessage = (role, text) => {
+    if (!currentChatId) {
+      setCurrentChatId("chat_" + Date.now());
+    }
     setMessages((prev) => [...prev, { role, text }]);
   };
 
@@ -72,7 +123,48 @@ function App() {
     setMessages([]);
     setPendingProfile(null);
     setIsProcessing(false);
-  }, []);
+    setCurrentChatId(null);
+    setActiveChatId(null);
+  }, [setActiveChatId]);
+
+  const handleLogoClick = useCallback(() => {
+    if (currentView !== "landing" && (profile || messages.length > 0)) {
+      setShowLeaveModal(true);
+    } else {
+      setCurrentView("landing");
+    }
+  }, [currentView, profile, messages]);
+
+  const handleLeaveConfirm = useCallback(() => {
+    setShowLeaveModal(false);
+    resetChat();
+    setCurrentView("landing");
+  }, [resetChat]);
+
+  const restoreChat = useCallback((chatId) => {
+    const chat = getChat(chatId);
+    if (!chat) return;
+    skipAutoSave.current = true;
+    setMessages(chat.messages || []);
+    setProfile(chat.profile || null);
+    setGraph(chat.graph || null);
+    setBaselineGraph(chat.baselineGraph || null);
+    setInterventions(chat.interventions || []);
+    setPendingProfile(chat.pendingProfile || null);
+    setCurrentChatId(chatId);
+    setActiveChatId(chatId);
+    setSelectedNode(null);
+    setIsProcessing(false);
+    setHistoryOpen(false);
+    setTimeout(() => { skipAutoSave.current = false; }, 0);
+  }, [getChat, setActiveChatId]);
+
+  const handleDeleteChat = useCallback((chatId) => {
+    deleteChat(chatId);
+    if (chatId === currentChatId) {
+      resetChat();
+    }
+  }, [deleteChat, currentChatId, resetChat]);
 
   const startNewProfile = useCallback(
     async (parsed) => {
@@ -199,7 +291,7 @@ function App() {
       <header className="app-header">
         <h1
           className="logo-link"
-          onClick={() => setCurrentView("landing")}
+          onClick={handleLogoClick}
         >
           lotus
           <svg className="logo-icon" width="36" height="36" viewBox="0 0 100 100" fill="none">
@@ -296,6 +388,18 @@ function App() {
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                   </svg>
                   <span>Conversation</span>
+                  {chatList.length > 0 && (
+                    <button
+                      className={`chat-history-toggle${historyOpen ? " active" : ""}`}
+                      onClick={() => setHistoryOpen((o) => !o)}
+                      title="Chat history"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      History
+                    </button>
+                  )}
                   {(profile || messages.length > 0) && (
                     <button className="new-chat-btn" onClick={resetChat} title="New Chat">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -305,10 +409,36 @@ function App() {
                     </button>
                   )}
                 </div>
+                {historyOpen && (
+                  <ChatHistory
+                    chatList={chatList}
+                    activeChatId={currentChatId}
+                    onSelect={restoreChat}
+                    onDelete={handleDeleteChat}
+                  />
+                )}
                 <div className="messages">
                   {messages.length === 0 && !isProcessing && (
                     <div className="messages-empty">
                       <p>Describe your health profile below to get started.</p>
+                      {!profile && (
+                        <div className="example-profiles">
+                          <span className="example-profiles-label">Try an example:</span>
+                          {[
+                            "55yo female with Type 2 diabetes and obesity on a PPO plan",
+                            "32yo male with asthma and anxiety on an HMO plan",
+                            "68yo female with hypertension, high cholesterol, and arthritis",
+                          ].map((ex) => (
+                            <button
+                              key={ex}
+                              className="example-profile-btn"
+                              onClick={() => handleInput(ex)}
+                            >
+                              {ex}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                   {messages.map((msg, i) => (
@@ -349,6 +479,25 @@ function App() {
 
       {currentView === "compare" && user && (
         <ComparePlans profile={profile} />
+      )}
+
+      {showLeaveModal && (
+        <div className="modal-backdrop" onClick={() => setShowLeaveModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">Leave this session?</h3>
+            <p className="modal-text">
+              Your current conversation is saved in history. You can pick it back up anytime from the chat history panel.
+            </p>
+            <div className="modal-actions">
+              <button className="modal-btn modal-btn-secondary" onClick={() => setShowLeaveModal(false)}>
+                Cancel
+              </button>
+              <button className="modal-btn modal-btn-primary" onClick={handleLeaveConfirm}>
+                Leave
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -499,6 +499,9 @@ export default function CareGraph({ graph, onNodeSelect }) {
     cy.minZoom(0.15);
     cy.maxZoom(3);
 
+    // Prevent duplicate handlers (React StrictMode double-mounts)
+    cy.removeAllListeners();
+
     // Background tap → clear focus and selection
     cy.on("tap", (e) => {
       if (e.target === cy) {
